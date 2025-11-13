@@ -1,0 +1,130 @@
+name: "Rust-like-Java — 3OS Build + ProofLedger + Release"
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rust-like-java-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-3os:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ----------------------------------------------------------
+      # Java 환경 준비
+      # ----------------------------------------------------------
+      - name: Setup Java (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Java (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # ----------------------------------------------------------
+      # src 자동 컴파일
+      # ----------------------------------------------------------
+      - name: Build Java Compiler Core
+        shell: bash
+        run: |
+          mkdir -p dist
+          mkdir -p bin
+          javac -d bin $(find src -name "*.java")
+
+      # ----------------------------------------------------------
+      # 작은 데모 실행 (func main: 파싱 예시)
+      # ----------------------------------------------------------
+      - name: Run Parser Demo
+        shell: bash
+        run: |
+          echo "func main:" > demo.mml
+          java -cp bin src.Main || true
+
+      # ----------------------------------------------------------
+      # ProofLedger 생성 (3OS 공통)
+      # ----------------------------------------------------------
+      - name: Generate ProofLedger
+        shell: bash
+        run: |
+          cd dist
+          echo "Rust-like-Java ProofLedger" > proofledger.txt
+          echo "OS: ${{ runner.os }}" >> proofledger.txt
+          echo "Commit: ${{ github.sha }}" >> proofledger.txt
+          echo "Timestamp: $(date)" >> proofledger.txt
+          echo "" >> proofledger.txt
+
+          # Hash tool 자동 선택
+          if command -v sha256sum > /dev/null; then
+            HASH="sha256sum"
+          else
+            HASH="shasum -a 256"
+          fi
+
+          $HASH ../src/token.java >> proofledger.txt 2>/dev/null || true
+          $HASH ../src/lexer.java >> proofledger.txt 2>/dev/null || true
+          $HASH ../src/parser.java >> proofledger.txt 2>/dev/null || true
+          $HASH ../src/ast.java >> proofledger.txt 2>/dev/null || true
+          $HASH ../src/main.java >> proofledger.txt 2>/dev/null || true
+
+      # ----------------------------------------------------------
+      # 아티팩트 업로드
+      # ----------------------------------------------------------
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-like-java-${{ runner.os }}
+          path: |
+            dist/*
+            bin/*
+            src/*
+            demo.mml
+
+  # --------------------------------------------------------------
+  # Release Job (빌드 완료 후)
+  # --------------------------------------------------------------
+  release:
+    needs: build-3os
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Tag
+        id: tag
+        run: |
+          VERSION="v1.0.$(date +%Y%m%d%H%M%S)"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          git tag $VERSION
+          git push origin $VERSION
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: releases
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.version }}
+          files: releases/**/*
